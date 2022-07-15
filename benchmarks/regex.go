@@ -34,7 +34,40 @@ func Baseline(DNSRules []*api.FQDNSelector) (map[string]string, string) {
 			reStrings = append(reStrings, "("+dnsPatternAsRE+")")
 		}
 	}
-	return make(map[string]string), strings.Join(reStrings, "|")
+	return nil, strings.Join(reStrings, "|")
+}
+func BaselineGroupless(DNSRules []*api.FQDNSelector) (map[string]string, string) {
+	reStrings := make([]string, 0, len(DNSRules))
+	for _, dnsRule := range DNSRules {
+		if len(dnsRule.MatchName) > 0 {
+			dnsRuleName := strings.ToLower(dns.Fqdn(dnsRule.MatchName))
+			dnsPatternAsRE := matchpattern.ToRegexp(dnsRuleName)
+			reStrings = append(reStrings, dnsPatternAsRE)
+		}
+		if len(dnsRule.MatchPattern) > 0 {
+			dnsPattern := matchpattern.Sanitize(dnsRule.MatchPattern)
+			dnsPatternAsRE := matchpattern.ToRegexp(dnsPattern)
+			reStrings = append(reStrings, dnsPatternAsRE)
+		}
+	}
+	return nil, strings.Join(reStrings, "|")
+}
+func BaselineOptimized(DNSRules []*api.FQDNSelector) (map[string]string, string) {
+	reStrings := make([]string, 0, len(DNSRules))
+	for _, dnsRule := range DNSRules {
+		if len(dnsRule.MatchName) > 0 {
+			dnsRuleName := strings.ToLower(dns.Fqdn(dnsRule.MatchName))
+			dnsPatternAsRE := CustomToRegexp(dnsRuleName)
+			reStrings = append(reStrings, dnsPatternAsRE)
+		}
+		if len(dnsRule.MatchPattern) > 0 {
+			dnsPattern := matchpattern.Sanitize(dnsRule.MatchPattern)
+			dnsPatternAsRE := CustomToRegexp(dnsPattern)
+			reStrings = append(reStrings, dnsPatternAsRE)
+		}
+	}
+	sort.Strings(reStrings)
+	return nil, "^(?:" + strings.Join(reStrings, "|") + ")$"
 }
 
 func ReverseAndSortRegex(DNSRules []*api.FQDNSelector) (map[string]string, string) {
@@ -52,7 +85,7 @@ func ReverseAndSortRegex(DNSRules []*api.FQDNSelector) (map[string]string, strin
 		}
 	}
 	sort.Strings(reStrings)
-	return make(map[string]string), "^[.](?:" + strings.Join(reStrings, "|") + ")$"
+	return nil, "^[.](?:" + strings.Join(reStrings, "|") + ")$"
 }
 
 func MapAndBaseline(DNSRules []*api.FQDNSelector) (map[string]string, string) {
@@ -137,7 +170,7 @@ func ReverseRegex(DNSRules []*api.FQDNSelector) (map[string]string, string) {
 			reStrings = append(reStrings, dnsPatternAsRE)
 		}
 	}
-	return make(map[string]string), "^[.](?:" + strings.Join(reStrings, "|") + ")$"
+	return nil, "^[.](?:" + strings.Join(reStrings, "|") + ")$"
 }
 
 const allowedDNSCharsREGroup = "[-a-zA-Z0-9_]"
@@ -186,22 +219,24 @@ type ProposedTechnique struct {
 
 var (
 	BaselineTechnique        = ProposedTechnique{"baseline", Baseline, identityFqdn}
+	BaselineOT               = ProposedTechnique{"baseline-optimized", BaselineOptimized, identityFqdn}
 	ReverseTechnique         = ProposedTechnique{"reverse", ReverseRegex, reverseFqdn}
 	ReverseAndSortTechnique  = ProposedTechnique{"reverse+sort", ReverseAndSortRegex, reverseFqdn}
 	MapAndBaselineTechnique  = ProposedTechnique{"map+baseline", MapAndBaseline, identityFqdn}
 	MapAndOptimizedTechnique = ProposedTechnique{"map+optimized", MapAndOptimized, identityFqdn}
-	MapAndReverseTechnique   = ProposedTechnique{"map+reverse", MapAndRegex, reverseFqdn}
+	MapAndReverseTechnique   = ProposedTechnique{"map+reverse+sort", MapAndRegex, reverseFqdn}
 	// This should force the golang regex implementation to avoid trying to create a onepass program. Since we won't end up using it anyways,
 	// and the compilation will "fail" anyways, we just short circuit to avoid the extra allocations when copying the program
-	MapAndReverseTechniqueNoOnepass = ProposedTechnique{"map+reverse+no+onepass", MapAndRegexNoOnepass, reverseFqdn}
+	//MapAndReverseTechniqueNoOnepass = ProposedTechnique{"map+reverse+no+onepass", MapAndRegexNoOnepass, reverseFqdn}
 
 	AllProposedTechniques = []ProposedTechnique{
 		BaselineTechnique,
+		BaselineOT,
 		ReverseTechnique,
 		ReverseAndSortTechnique,
 		MapAndBaselineTechnique,
 		MapAndOptimizedTechnique,
-		MapAndReverseTechniqueNoOnepass,
+		//MapAndReverseTechniqueNoOnepass,
 		MapAndReverseTechnique,
 	}
 )

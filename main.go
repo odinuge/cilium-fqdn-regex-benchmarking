@@ -17,9 +17,8 @@ func main() {
 	fmt.Println("FQDN patterns:")
 	fmt.Printf("%+v\n\n", slect)
 	fmt.Println("Regexes:")
-	for _, sol := range benchmarks.AllProposedSolutions {
+	for _, sol := range benchmarks.AllProposedTechniques {
 		maap, rei := sol.RegexGenerator(slect)
 		fmt.Printf("%-25s: %q  +  %+v\n", sol.Name, rei, maap)
 	}
-
 }

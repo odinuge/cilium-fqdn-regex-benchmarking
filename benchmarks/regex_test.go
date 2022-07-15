@@ -6,6 +6,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy/api"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,7 +14,7 @@ import (
 
 // Number of domains from list to add to regexp/matching
 // zero means all
-const numberOfDomainsInCNP = 3000
+const numberOfDomainsInCNP = 500
 
 // Number of domains to run checks against.
 // zero means all domains.
@@ -25,12 +26,18 @@ const domainCheckSize = numberOfDomainsInCNP
 var filename = "./10000-domains.txt"
 
 // If you want to test a single technique to compare with eg. benchstat
-func BenchmarkSingleTechnique(b *testing.B) {
+func BenchmarkSingle(b *testing.B) {
 	b.Skip()
-	benchmarkTechniques(b, []ProposedTechnique{MapAndReverseTechniqueNoOnepass})
+	benchmarkTechniques(b, []ProposedTechnique{MapAndBaselineTechnique})
 }
-func BenchmarkAllTechnique(b *testing.B) {
+func BenchmarkAll(b *testing.B) {
 	benchmarkTechniques(b, AllProposedTechniques)
+}
+func reverse[S ~[]E, E any](s S) S {
+	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+		s[i], s[j] = s[j], s[i]
+	}
+	return s
 }
 
 func benchmarkTechniques(b *testing.B, techniques []ProposedTechnique) {
@@ -42,45 +49,108 @@ func benchmarkTechniques(b *testing.B, techniques []ProposedTechnique) {
 			inputDomains  []string
 		}{
 			// Domains allowlisted by a matchName
-			{"match-fqdn", true, domainsFqdn},
+			{"match-name", true, domainsFqdn},
 			// Domains allowlisted by a matchPattern with a wildcard
-			{"match-wild", true, domainsWildcard},
+			{"match-pattern", true, reverse(domainsWildcard)},
 			// Domains not allowlisted, has a prefix found in no domain
-			{"match-not-wild", false, badDomains},
+			{"bad-match-pattern", false, badDomains},
 			// Domains not allowlisted, has a tld found in no domain
-			{"match-not-tld", false, badDomainsTld},
+			{"bad-match-tld", false, badDomainsTld},
 		}
 		testName := func(name string) string {
 			var techniqueName string
 			if len(techniques) != 1 {
 				techniqueName = bm.Name
 			}
-			return fmt.Sprintf("%-17s: %-23s: domains:%4d", name, techniqueName, len(domains))
+			return fmt.Sprintf("%-17s: %-23s", name, techniqueName)
 		}
 		// the generate bench is for benchmarking the generation of the regex string, plus
 		// the extra map in case its used
 		b.Run(testName("generate"), func(b *testing.B) {
+			b.StopTimer()
+			b.ResetTimer()
+			runtime.GC()
+			var sum float64
 			b.ReportAllocs()
 			for a := 0; a < b.N; a++ {
-				_, regex := bm.RegexGenerator(selector)
-				if regex == "" {
+				runtime.GC()
+				runtime.GC()
+				s := getMemStats()
+				b.StartTimer()
+				fqs, regex := bm.RegexGenerator(selector)
+				b.StopTimer()
+				runtime.GC()
+				runtime.GC()
+				s2 := getMemStats()
+				sum += float64(s2.HeapInuse - s.HeapInuse)
+				if regex == "" || (fqs != nil && len(fqs) == 0) {
 					b.Fail()
 				}
+				if !(strings.Contains(regex, "testing-domain") || strings.Contains(regex, Reverse("testing-domain"))) {
+					b.Fail()
+				}
+				for k := range fqs {
+					delete(fqs, k)
+				}
 			}
+			b.ReportMetric(sum/float64(b.N), "B(heap)/op")
+			b.ReportMetric(float64(len(domains)), "domains")
 		})
-		_, regex := bm.RegexGenerator(selector)
-		b.Run(testName("regex-compile"), func(b *testing.B) {
+		b.Run(testName("compile"), func(b *testing.B) {
+			b.StopTimer()
+			_, regex := bm.RegexGenerator(selector)
+			runtime.GC()
+			s := getMemStats()
+			var sum float64
+			b.StartTimer()
 			b.ReportAllocs()
 			for n := 0; n < b.N; n++ {
 				pattern := regexp.MustCompile(regex)
-				if pattern.String() == "" {
+				b.StopTimer()
+				runtime.GC()
+				runtime.GC()
+				s2 := getMemStats()
+				sum += float64(s2.HeapInuse - s.HeapInuse)
+				if pattern.String() == "" || pattern.MatchString("asd") || pattern.MatchString(badDomains[0]) || !pattern.MatchString(domainsWildcard[0]) {
 					b.Fail()
 				}
+				b.StartTimer()
 			}
-
+			b.StopTimer()
+			b.ReportMetric(sum/float64(b.N), "B(heap)/op")
+			b.ReportMetric(float64(len(domains)), "domains")
 		})
-		var mapping map[string]string
-		mapping, regex = bm.RegexGenerator(selector)
+
+		b.Run(testName("combined-compile"), func(b *testing.B) {
+			b.StopTimer()
+			runtime.GC()
+			s := getMemStats()
+			var sum float64
+			b.ResetTimer()
+			b.ReportAllocs()
+			for n := 0; n < b.N; n++ {
+				runtime.GC()
+				runtime.GC()
+				b.StartTimer()
+				fqs, regex := bm.RegexGenerator(selector)
+				pattern := regexp.MustCompile(regex)
+				b.StopTimer()
+				runtime.GC()
+				runtime.GC()
+				s2 := getMemStats()
+				sum += float64(s2.HeapInuse - s.HeapInuse)
+				if pattern.String() == "" || pattern.MatchString("asd") || pattern.MatchString(badDomains[0]) || !pattern.MatchString(domainsWildcard[0]) {
+					b.Fail()
+				}
+				for k := range fqs {
+					delete(fqs, k)
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(sum/float64(b.N), "B(heap)/op")
+			b.ReportMetric(float64(len(domains)), "domains")
+		})
+		mapping, regex := bm.RegexGenerator(selector)
 		pattern := regexp.MustCompile(regex)
 
 		numberOfDomains := domainCheckSize
@@ -90,16 +160,26 @@ func benchmarkTechniques(b *testing.B, techniques []ProposedTechnique) {
 		for _, matchingTest := range matchingTests {
 			b.Run(testName(matchingTest.name), func(b *testing.B) {
 				b.ReportAllocs()
+				b.StopTimer()
+				b.ResetTimer()
 				for n := 0; n < b.N; n++ {
-					for i := 0; i < numberOfDomains; i++ {
-						testDomain := matchingTest.inputDomains[i%len(matchingTest.inputDomains)]
-						_, isInFqdnMap := mapping[testDomain]
-						if (isInFqdnMap || pattern.MatchString(testDomain)) != matchingTest.matchExpected {
-							fmt.Println(testDomain)
-							b.Fail()
-						}
+					runtime.GC()
+					runtime.GC()
+					runtime.GC()
+					runtime.GC()
+					b.StartTimer()
+					var isInFqdnMap bool
+					testDomain := matchingTest.inputDomains[n%len(matchingTest.inputDomains)]
+					if mapping != nil {
+						_, isInFqdnMap = mapping[testDomain]
 					}
+					if (isInFqdnMap || pattern.MatchString(testDomain)) != matchingTest.matchExpected {
+						fmt.Println(testDomain)
+						b.Fail()
+					}
+					b.StopTimer()
 				}
+				b.ReportMetric(float64(len(domains)), "domains")
 			})
 		}
 	}
@@ -117,7 +197,7 @@ func getTestData(filename string, dataSize int, domainRewriter func(string) stri
 		lines = append(lines, line)
 	}
 	// Always append a wildcard domain like this to ensure we have one, since its required for the test
-	lines = append([]string{"*.sbsdasdasd3.aws.baa"}, lines...)
+	lines = append([]string{"*.testing-domains.aws.baa"}, lines...)
 	for i, line := range lines {
 		if dataSize != 0 && i >= dataSize {
 			break
@@ -125,7 +205,7 @@ func getTestData(filename string, dataSize int, domainRewriter func(string) stri
 		domains = append(domains,
 			domainRewriter(strings.ReplaceAll(line, "*", "bar")))
 		badDomains = append(badDomains,
-			domainRewriter("nope.nop.nop.nop."+strings.ReplaceAll(line, "*", "bar")))
+			domainRewriter("nope.nop.nop.nop."+strings.ReplaceAll(line, "*", "bar.hmm")))
 		badDomainsTld = append(badDomainsTld,
 			domainRewriter(strings.ReplaceAll(line, "*", "bar")+".bar"+strconv.Itoa(i)+"s"))
 
@@ -146,4 +226,9 @@ func getTestData(filename string, dataSize int, domainRewriter func(string) stri
 		}
 	}
 	return
+}
+func getMemStats() runtime.MemStats {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m
 }
